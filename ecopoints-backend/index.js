@@ -10,32 +10,43 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors());
+// Update CORS configuration for direct connection
+app.use(cors({
+  origin: 'http://localhost:3000',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept']
+}));
+
 app.use(express.json());
 
-// Test Supabase connection
-const testConnection = async () => {
+// Simple root endpoint
+app.get('/', (req, res) => {
+  res.json({ message: 'EcoPoints API is running' });
+});
+
+// Update health check endpoint
+app.get('/api/health', (req, res) => {
+  console.log('Health check received from:', req.headers.origin);
   try {
-    const { data, error } = await supabase
-      .from('users')
-      .select('count');
-    
-    if (error) throw error;
-    console.log('Supabase connected successfully');
-  } catch (err) {
-    console.error('Supabase connection error:', err);
-    process.exit(1);
+    res.json({ 
+      status: 'ok',
+      server: 'running',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json({ status: 'error', message: error.message });
   }
-};
+});
 
-testConnection();
-
-// Example login endpoint using Supabase
+// Login endpoint with better error handling
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   
   try {
+    console.log('Login attempt for:', email);
+
     const { data: user, error } = await supabase
       .from('users')
       .select('*')
@@ -43,24 +54,23 @@ app.post('/api/login', async (req, res) => {
       .single();
 
     if (error || !user) {
+      console.log('Login failed: User not found');
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     const validPassword = await bcrypt.compare(password, user.password);
     if (!validPassword) {
+      console.log('Login failed: Invalid password');
       return res.status(401).json({ message: 'Invalid credentials' });
     }
 
     const token = jwt.sign(
-      { 
-        id: user.id, 
-        email: user.email,
-        is_admin: user.is_admin 
-      },
-      JWT_SECRET,
+      { id: user.id, is_admin: user.is_admin },
+      process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
 
+    console.log('Login successful for:', email);
     res.json({
       token,
       user: {
@@ -76,83 +86,57 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Add this after your imports
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
-
-// Update the register endpoint
-app.post('/api/register', async (req, res) => {
-  const { name, username, password } = req.body;
+// Signup endpoint with better error handling
+app.post('/api/auth/signup', async (req, res) => {
+  const { email, password, name } = req.body;
 
   try {
-    // Validate password strength
-    if (password.length < 6) {
-      return res.status(400).json({
-        message: 'Registration failed',
-        error: 'weak_password: Password should be at least 6 characters long'
-      });
-    }
+    console.log('Starting signup for:', email);
 
-    // Convert username to email format if it's not already
-    const email = username.includes('@') ? username : `${username}@ecopoints.com`;
+    // Check if user already exists
+    const { data: existingUser } = await supabase
+      .from('users')
+      .select('email')
+      .eq('email', email)
+      .single();
+
+    if (existingUser) {
+      return res.status(400).json({ message: 'Email already registered' });
+    }
 
     // Create auth user in Supabase
     const { data: authData, error: authError } = await supabase.auth.signUp({
-      email: email,
+      email,
       password,
-      options: {
-        data: {
-          username: username,
-          name: name
-        }
-      }
+      options: { data: { name } }
     });
 
-    if (authError) {
-      if (authError.message.includes('weak')) {
-        return res.status(400).json({
-          message: 'Registration failed',
-          error: 'weak_password: ' + authError.message
-        });
-      }
-      throw authError;
-    }
+    if (authError) throw authError;
 
     // Hash password for users table
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
     // Create user profile
-    const { data: newUser, error: insertError } = await supabase
+    const { data: profileData, error: profileError } = await supabase
       .from('users')
       .insert([{
         id: authData.user.id,
-        name,
-        username,
+        email: email,
+        name: name,
         password: hashedPassword,
         points: 0,
         money: 0,
         is_admin: false
       }])
-      .select()
       .single();
 
-    if (insertError) throw insertError;
+    if (profileError) throw profileError;
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { id: newUser.id, username: newUser.username },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
+    console.log('Signup successful for:', email);
     res.status(201).json({
-      message: 'Registration successful',
-      token,
-      user: {
-        id: newUser.id,
-        name: newUser.name,
-        username: newUser.username
-      }
+      message: 'Registration successful!',
+      user: authData.user
     });
 
   } catch (error) {
@@ -164,439 +148,23 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-app.get('/api/notifications', async (req, res) => {
-  const { userId } = req.query;
-  try {
-    const { data: notifications, error } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('user_id', userId)
-      .eq('is_read', false)
-      .order('created_at', { ascending: false })
-      .limit(5);
+// Enhanced server startup
+const PORT = process.env.PORT || 5000;
 
-    if (error) throw error;
-
-    res.json(notifications);
-  } catch (error) {
-    console.error('Notifications error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
 
-// Get user points
-app.get('/api/user-points/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('points')
-      .eq('id', userId)
-      .single();
-
-    if (error) throw error;
-
-    res.json({ points: user?.points || 0 });
-  } catch (error) {
-    console.error('Error fetching points:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
+// Error handling for unhandled routes
+app.use((req, res) => {
+  res.status(404).json({ message: 'Route not found' });
 });
 
-// Get user stats endpoint
-app.get('/api/user-stats/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const token = req.headers.authorization?.split(' ')[1];
-
-    if (!token) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const { data: userStats, error } = await supabase
-      .from('users')
-      .select('points, money')
-      .eq('id', userId)
-      .single();
-
-    if (error) {
-      console.error('Database error:', error);
-      return res.status(500).json({ message: 'Failed to fetch user data' });
-    }
-
-    if (!userStats) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    res.json({
-      points: userStats.points || 0,
-      money: userStats.money || 0
-    });
-
-  } catch (error) {
-    console.error('Server error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-});
-
-// Submit redemption request
-app.post('/api/redeem-request', async (req, res) => {
-  try {
-    const { userId, points, status } = req.body;
-
-    const { data: redemptionRequest, error: insertError } = await supabase
-      .from('redemption_requests')
-      .insert([{
-        user_id: userId,
-        points,
-        status
-      }])
-      .single();
-
-    if (insertError) throw insertError;
-
-    // Notify admins (you can implement this through websockets or email)
-    const { error: notifyError } = await supabase
-      .from('notifications')
-      .insert([{
-        user_id: userId,
-        message: `New redemption request for ${points} points from user ${userId}`,
-        type: 'redemption_request'
-      }]);
-
-    if (notifyError) throw notifyError;
-
-    res.json({ message: 'Redemption request created successfully' });
-  } catch (error) {
-    console.error('Error creating redemption request:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// Get pending redemptions for a user
-app.get('/api/pending-redemptions/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { data: pendingRedemptions, error } = await supabase
-      .from('redemption_requests')
-      .select('id, points, status, created_at')
-      .eq('user_id', userId)
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-
-    res.json(pendingRedemptions);
-  } catch (error) {
-    console.error('Error fetching pending redemptions:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// Use middleware for admin routes
-app.get('/api/admin/users', async (req, res) => {
-  try {
-    const adminId = req.headers.authorization?.split(' ')[1];
-
-    if (!adminId) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const { data: adminCheck, error: adminError } = await supabase
-      .from('users')
-      .select('is_admin')
-      .eq('id', adminId)
-      .single();
-
-    if (adminError || !adminCheck?.is_admin) {
-      return res.status(403).json({ message: 'Unauthorized access' });
-    }
-
-    const { data: users, error } = await supabase
-      .rpc('get_admin_users')
-      .order('id');
-
-    if (error) throw error;
-
-    res.json(users);
-  } catch (error) {
-    console.error('Admin users error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-app.get('/api/admin/pending-redemptions', async (req, res) => {
-  try {
-    const adminId = req.headers.authorization?.split(' ')[1];
-
-    if (!adminId) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const { data: adminCheck, error: adminError } = await supabase
-      .from('users')
-      .select('is_admin')
-      .eq('id', adminId)
-      .single();
-
-    if (adminError || !adminCheck?.is_admin) {
-      return res.status(403).json({ message: 'Unauthorized access' });
-    }
-
-    const { data: pendingRedemptions, error } = await supabase
-      .rpc('get_pending_redemptions')
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
-
-    res.json(pendingRedemptions);
-  } catch (error) {
-    console.error('Database error:', error);
-    res.status(500).json({ message: 'Error fetching pending redemptions' });
-  }
-});
-
-app.get('/api/admin/approved-redemptions', async (req, res) => {
-  try {
-    const adminId = req.headers.authorization?.split(' ')[1];
-
-    if (!adminId) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const { data: adminCheck, error: adminError } = await supabase
-      .from('users')
-      .select('is_admin')
-      .eq('id', adminId)
-      .single();
-
-    if (adminError || !adminCheck?.is_admin) {
-      return res.status(403).json({ message: 'Unauthorized access' });
-    }
-
-    const { data: approvedRedemptions, error } = await supabase
-      .rpc('get_approved_redemptions')
-      .order('processed_at', { ascending: false });
-
-    if (error) throw error;
-
-    res.json(approvedRedemptions);
-  } catch (error) {
-    console.error('Server error:', error);
-    res.status(500).json({ message: 'Error fetching approved redemptions' });
-  }
-});
-
-// Get user transactions endpoint
-app.get('/api/transactions/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    const { data: userCheck, error: userError } = await supabase
-      .from('users')
-      .select('id')
-      .eq('id', userId)
-      .single();
-
-    if (userError || !userCheck) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    const { data: transactions, error } = await supabase
-      .rpc('get_user_transactions', { user_id: userId });
-
-    if (error) throw error;
-
-    res.json(transactions);
-  } catch (error) {
-    console.error('Database error:', error);
-    res.status(500).json({ message: 'Error fetching transaction history' });
-  }
-});
-
-app.put('/api/admin/recyclables/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { points_per_piece } = req.body;
-    const adminId = req.headers.authorization?.split(' ')[1];
-
-    if (!adminId) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const { data: adminCheck, error: adminError } = await supabase
-      .from('users')
-      .select('is_admin')
-      .eq('id', adminId)
-      .single();
-
-    if (adminError || !adminCheck?.is_admin) {
-      return res.status(403).json({ message: 'Unauthorized access' });
-    }
-
-    const { error } = await supabase
-      .from('recyclables')
-      .update({ points_per_piece })
-      .eq('id', id);
-
-    if (error) throw error;
-
-    res.json({ message: 'Value updated successfully' });
-  } catch (error) {
-    console.error('Database error:', error);
-    res.status(500).json({ message: 'Error updating recyclable value' });
-  }
-});
-
-app.get('/api/admin/recyclables', async (req, res) => {
-  try {
-    const adminId = req.headers.authorization?.split(' ')[1];
-
-    if (!adminId) {
-      return res.status(401).json({ message: 'Authentication required' });
-    }
-
-    const { data: adminCheck, error: adminError } = await supabase
-      .from('users')
-      .select('is_admin')
-      .eq('id', adminId)
-      .single();
-
-    if (adminError || !adminCheck?.is_admin) {
-      return res.status(403).json({ message: 'Unauthorized access' });
-    }
-
-    const { data: recyclables, error } = await supabase
-      .from('recyclables')
-      .select('id, name, points_per_piece')
-      .order('name');
-
-    if (error) throw error;
-
-    res.json(recyclables);
-  } catch (error) {
-    console.error('Database error:', error);
-    res.status(500).json({ message: 'Error fetching recyclables' });
-  }
-});
-
-app.post('/api/admin/process-redemption', async (req, res) => {
-  try {
-    const { requestId, adminId, status } = req.body;
-
-    if (!requestId || !adminId || !status) {
-      return res.status(400).json({ message: 'Missing required fields' });
-    }
-
-    const { data: adminCheck, error: adminError } = await supabase
-      .from('users')
-      .select('is_admin')
-      .eq('id', adminId)
-      .single();
-
-    if (adminError || !adminCheck?.is_admin) {
-      return res.status(403).json({ message: 'Unauthorized access' });
-    }
-
-    const { data: request, error: updateError } = await supabase
-      .from('redemption_requests')
-      .update({
-        status,
-        processed_by: adminId,
-        processed_at: new Date().toISOString()
-      })
-      .eq('id', requestId)
-      .eq('status', 'pending')
-      .single();
-
-    if (updateError) throw updateError;
-
-    if (status === 'approved') {
-      const { error: balanceError } = await supabase
-        .from('users')
-        .update({ money: supabase.raw('money + ?', [request.points]) })
-        .eq('id', request.user_id);
-
-      if (balanceError) throw balanceError;
-    }
-
-    res.json({ message: `Request ${status} successfully`, request });
-  } catch (error) {
-    console.error('Process redemption error:', error);
-    res.status(500).json({ message: error.message || 'Failed to process redemption request' });
-  }
-});
-
-// Update the register endpoint
-app.post('/api/auth/signup', async (req, res) => {
-  const { email, password, name } = req.body;
-
-  try {
-    if (password.length < 6) {
-      return res.status(400).json({
-        message: 'Registration failed',
-        error: 'weak_password: Password should be at least 6 characters long'
-      });
-    }
-
-    // Check if user already exists
-    const { data: existingUser, error: checkError } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({
-        message: 'Registration failed',
-        error: 'User with this email already exists'
-      });
-    }
-
-    // Create user profile
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const { data: newUser, error: insertError } = await supabase
-      .from('users')
-      .insert([{
-        email,
-        name,
-        password: hashedPassword,
-        points: 0,
-        money: 0,
-        is_admin: false
-      }])
-      .select()
-      .single();
-
-    if (insertError) throw insertError;
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { id: newUser.id, email: newUser.email },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    res.status(201).json({
-      message: 'Registration successful',
-      token,
-      user: {
-        id: newUser.id,
-        name: newUser.name,
-        email: newUser.email
-      }
-    });
-
-  } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).json({
-      message: 'Registration failed',
-      error: error.message
-    });
-  }
-});
-
-// Start server
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Global error:', err);
+  res.status(500).json({ 
+    message: 'Internal server error',
+    error: err.message
+  });
 });

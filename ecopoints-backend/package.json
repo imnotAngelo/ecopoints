@@ -1,9 +1,11 @@
 {
   "name": "ecopoints-backend",
   "version": "1.0.0",
+  "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node --no-deprecation index.js",
+    "dev": "nodemon --no-deprecation index.js"
   },
   "keywords": [],
   "author": "",

@@ -3,8 +3,10 @@
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.0",
     "@mui/material": "^7.0.1",
+    "@supabase/supabase-js": "^2.49.4",
     "axios": "^1.8.4",
     "chart.js": "^4.4.8",
+    "postgres": "^3.4.5",
     "react-chartjs-2": "^5.3.0",
     "react-router-dom": "^7.5.0"
   }
