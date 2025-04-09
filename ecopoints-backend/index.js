@@ -33,13 +33,13 @@ testConnection();
 
 // Example login endpoint using Supabase
 app.post('/api/login', async (req, res) => {
-  const { username, password } = req.body;
+  const { email, password } = req.body;
   
   try {
     const { data: user, error } = await supabase
       .from('users')
       .select('*')
-      .eq('username', username)
+      .eq('email', email)
       .single();
 
     if (error || !user) {
@@ -52,8 +52,12 @@ app.post('/api/login', async (req, res) => {
     }
 
     const token = jwt.sign(
-      { id: user.id, is_admin: user.is_admin },
-      process.env.JWT_SECRET,
+      { 
+        id: user.id, 
+        email: user.email,
+        is_admin: user.is_admin 
+      },
+      JWT_SECRET,
       { expiresIn: '24h' }
     );
 
@@ -62,7 +66,7 @@ app.post('/api/login', async (req, res) => {
       user: {
         id: user.id,
         name: user.name,
-        username: user.username,
+        email: user.email,
         is_admin: user.is_admin
       }
     });
@@ -203,20 +207,35 @@ app.get('/api/user-points/:userId', async (req, res) => {
 app.get('/api/user-stats/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
+    const token = req.headers.authorization?.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ message: 'Authentication required' });
+    }
+
     const { data: userStats, error } = await supabase
-      .rpc('get_user_stats', { user_id: userId })
+      .from('users')
+      .select('points, money')
+      .eq('id', userId)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('Database error:', error);
+      return res.status(500).json({ message: 'Failed to fetch user data' });
+    }
 
     if (!userStats) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    res.json(userStats);
+    res.json({
+      points: userStats.points || 0,
+      money: userStats.money || 0
+    });
+
   } catch (error) {
-    console.error('Error fetching user stats:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Server error:', error);
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
 
@@ -508,41 +527,64 @@ app.post('/api/admin/process-redemption', async (req, res) => {
   }
 });
 
+// Update the register endpoint
 app.post('/api/auth/signup', async (req, res) => {
   const { email, password, name } = req.body;
 
   try {
-    // 1. Create auth user in Supabase
-    const { data: authData, error: authError } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          name,
-        }
-      }
-    });
+    if (password.length < 6) {
+      return res.status(400).json({
+        message: 'Registration failed',
+        error: 'weak_password: Password should be at least 6 characters long'
+      });
+    }
 
-    if (authError) throw authError;
+    // Check if user already exists
+    const { data: existingUser, error: checkError } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+      .single();
 
-    // 2. Create user profile in your users table
-    const { data: profileData, error: profileError } = await supabase
+    if (existingUser) {
+      return res.status(400).json({
+        message: 'Registration failed',
+        error: 'User with this email already exists'
+      });
+    }
+
+    // Create user profile
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const { data: newUser, error: insertError } = await supabase
       .from('users')
       .insert([{
-        id: authData.user.id,
-        email: email,
-        name: name,
+        email,
+        name,
+        password: hashedPassword,
         points: 0,
         money: 0,
         is_admin: false
       }])
+      .select()
       .single();
 
-    if (profileError) throw profileError;
+    if (insertError) throw insertError;
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: newUser.id, email: newUser.email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
 
     res.status(201).json({
-      message: 'Registration successful! Please check your email for verification.',
-      user: authData.user
+      message: 'Registration successful',
+      token,
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        email: newUser.email
+      }
     });
 
   } catch (error) {
